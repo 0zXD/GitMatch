@@ -148,23 +148,29 @@ export interface HarvestResult {
   issues: GitHubIssue[];
   hasMore: boolean;
   page: number;
+  endCursor?: string;
 }
 
 interface HarvestResponse {
   results: RepoResult[];
   has_more: boolean;
   page: number;
+  end_cursor?: string;
 }
 
 export async function fetchReposForSkills(
   skills: string[],
   signal?: AbortSignal,
   page: number = 1,
+  cursor?: string,
 ): Promise<HarvestResult> {
   if (skills.length === 0) return { issues: [], hasMore: false, page: 1 };
 
   const query = buildSearchQuery(skills);
   const params = new URLSearchParams({ q: query, page: String(page) });
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
   const response = await fetch(`${HARVESTER_URL}/harvest?${params}`, { signal });
 
   if (!response.ok) {
@@ -181,5 +187,6 @@ export async function fetchReposForSkills(
     issues,
     hasMore: data.has_more ?? false,
     page: data.page ?? page,
+    endCursor: data.end_cursor,
   };
 }

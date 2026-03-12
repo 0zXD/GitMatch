@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,9 +34,59 @@ type RepoResult struct {
 }
 
 type CachedQuery struct {
-	Key      string       `bson:"_id"`
-	Results  []RepoResult `bson:"results"`
-	CachedAt time.Time    `bson:"cached_at"`
+	Key       string       `bson:"_id"`
+	Results   []RepoResult `bson:"results"`
+	HasMore   bool         `bson:"has_more"`
+	EndCursor string       `bson:"end_cursor"`
+	CachedAt  time.Time    `bson:"cached_at"`
+}
+
+// GraphQL response types for GitHub API v4
+type graphQLResponse struct {
+	Data   graphQLData    `json:"data"`
+	Errors []graphQLError `json:"errors"`
+}
+
+type graphQLError struct {
+	Message string `json:"message"`
+}
+
+type graphQLData struct {
+	Search graphQLSearch `json:"search"`
+}
+
+type graphQLSearch struct {
+	RepositoryCount int             `json:"repositoryCount"`
+	PageInfo        graphQLPageInfo `json:"pageInfo"`
+	Nodes           []graphQLNode   `json:"nodes"`
+}
+
+type graphQLPageInfo struct {
+	HasNextPage bool   `json:"hasNextPage"`
+	EndCursor   string `json:"endCursor"`
+}
+
+type graphQLNode struct {
+	NameWithOwner   string `json:"nameWithOwner"`
+	StargazerCount  int    `json:"stargazerCount"`
+	ForkCount       int    `json:"forkCount"`
+	URL             string `json:"url"`
+	Description     string `json:"description"`
+	PrimaryLanguage *struct {
+		Name string `json:"name"`
+	} `json:"primaryLanguage"`
+	Issues struct {
+		TotalCount int `json:"totalCount"`
+	} `json:"issues"`
+	Languages struct {
+		TotalSize int `json:"totalSize"`
+		Edges     []struct {
+			Size int `json:"size"`
+			Node struct {
+				Name string `json:"name"`
+			} `json:"node"`
+		} `json:"edges"`
+	} `json:"languages"`
 }
 
 var cacheCollection *mongo.Collection
@@ -88,6 +139,135 @@ func normalizeCacheKey(q string) string {
 	return strings.Join(tokens, " ")
 }
 
+const graphQLQueryTemplate = `query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: REPOSITORY, first: $first, after: $after) {
+    repositoryCount
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      ... on Repository {
+        nameWithOwner
+        stargazerCount
+        forkCount
+        url
+        description
+        primaryLanguage {
+          name
+        }
+        issues(states: OPEN) {
+          totalCount
+        }
+        languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+          totalSize
+          edges {
+            size
+            node {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}`
+
+// graphqlSearchRepos executes a single GraphQL query that fetches repos + languages
+// in one API call, replacing the N+1 REST calls (1 search + N language fetches).
+func graphqlSearchRepos(ctx context.Context, token, query string, first int, after string) (*graphQLSearch, error) {
+	variables := map[string]interface{}{
+		"query": query,
+		"first": first,
+	}
+	if after != "" {
+		variables["after"] = after
+	}
+
+	body := map[string]interface{}{
+		"query":     graphQLQueryTemplate,
+		"variables": variables,
+	}
+
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.github.com/graphql", bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("graphql request failed with status %d", resp.StatusCode)
+	}
+
+	var gqlResp graphQLResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
+		return nil, fmt.Errorf("decode response: %w", err)
+	}
+
+	if len(gqlResp.Errors) > 0 {
+		return nil, fmt.Errorf("graphql error: %s", gqlResp.Errors[0].Message)
+	}
+
+	return &gqlResp.Data.Search, nil
+}
+
+// graphqlNodeToResult converts a GraphQL repository node to a RepoResult,
+// extracting language breakdown from the same response (no extra API call).
+func graphqlNodeToResult(node graphQLNode) *RepoResult {
+	if node.Issues.TotalCount == 0 {
+		return nil
+	}
+
+	primaryLang := ""
+	if node.PrimaryLanguage != nil {
+		primaryLang = node.PrimaryLanguage.Name
+	}
+
+	totalBytes := node.Languages.TotalSize
+	if totalBytes == 0 {
+		return nil
+	}
+
+	breakdown := make(map[string]float64)
+	var validTags []string
+	for _, edge := range node.Languages.Edges {
+		percentage := (float64(edge.Size) / float64(totalBytes)) * 100
+		breakdown[edge.Node.Name] = percentage
+		if percentage >= 10.0 {
+			validTags = append(validTags, edge.Node.Name)
+		}
+	}
+
+	if len(validTags) == 0 {
+		return nil
+	}
+
+	return &RepoResult{
+		Name:              node.NameWithOwner,
+		Stars:             node.StargazerCount,
+		Forks:             node.ForkCount,
+		URL:               node.URL,
+		Description:       node.Description,
+		PrimaryLanguage:   primaryLang,
+		OpenIssues:        node.Issues.TotalCount,
+		LanguageBreakdown: breakdown,
+		ValidTags:         validTags,
+	}
+}
+
 func main() {
 	// Try to load .env from current directory, back up to parent if missing
 	if err := godotenv.Load(); err != nil {
@@ -134,7 +314,17 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cacheKey := fmt.Sprintf("%s|page=%d", normalizeCacheKey(q), page)
+	cursor := r.URL.Query().Get("cursor")
+	token := os.Getenv("GITHUB_TOKEN")
+	useGraphQL := token != ""
+
+	// Build cache key: GraphQL uses cursor-based, REST uses page-based
+	var cacheKey string
+	if useGraphQL {
+		cacheKey = fmt.Sprintf("gql|%s|cursor=%s", normalizeCacheKey(q), cursor)
+	} else {
+		cacheKey = fmt.Sprintf("%s|page=%d", normalizeCacheKey(q), page)
+	}
 
 	// Try cache first
 	if cacheCollection != nil {
@@ -147,24 +337,99 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Cache HIT for %q", cacheKey)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
-			response := struct {
-				Results []RepoResult `json:"results"`
-				HasMore bool         `json:"has_more"`
-				Page    int          `json:"page"`
+			json.NewEncoder(w).Encode(struct {
+				Results   []RepoResult `json:"results"`
+				HasMore   bool         `json:"has_more"`
+				Page      int          `json:"page"`
+				EndCursor string       `json:"end_cursor,omitempty"`
 			}{
-				Results: cached.Results,
-				HasMore: true, // Assume more pages available from cache
-				Page:    page,
-			}
-			json.NewEncoder(w).Encode(response)
+				Results:   cached.Results,
+				HasMore:   cached.HasMore,
+				Page:      page,
+				EndCursor: cached.EndCursor,
+			})
 			return
 		}
 	}
 
-	ctx := context.Background()
-	token := os.Getenv("GITHUB_TOKEN")
-	var client *github.Client
+	var results []RepoResult
+	var hasMore bool
+	var endCursor string
 
+	if useGraphQL {
+		// GraphQL path: 1 API call replaces N+1 REST calls
+		log.Printf("GraphQL search: %q (cursor=%q)", q, cursor)
+		fullQuery := fmt.Sprintf("%s stars:>0 sort:updated-desc", q)
+
+		searchResult, err := graphqlSearchRepos(r.Context(), token, fullQuery, 30, cursor)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("GraphQL search failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		for _, node := range searchResult.Nodes {
+			if res := graphqlNodeToResult(node); res != nil {
+				results = append(results, *res)
+			}
+		}
+		hasMore = searchResult.PageInfo.HasNextPage
+		endCursor = searchResult.PageInfo.EndCursor
+		log.Printf("GraphQL returned %d repos → %d valid results (1 API call)", len(searchResult.Nodes), len(results))
+	} else {
+		// REST fallback: N+1 API calls (no token = no GraphQL)
+		log.Println("REST fallback (no GITHUB_TOKEN set — consider adding one for GraphQL efficiency)")
+		results, hasMore = restSearchRepos(r.Context(), q, page, r.URL.Query().Get("lite") == "true")
+	}
+
+	// Save to cache
+	if cacheCollection != nil && len(results) > 0 {
+		cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		doc := CachedQuery{
+			Key:       cacheKey,
+			Results:   results,
+			HasMore:   hasMore,
+			EndCursor: endCursor,
+			CachedAt:  time.Now(),
+		}
+		_, err := cacheCollection.ReplaceOne(cacheCtx, bson.M{"_id": cacheKey}, doc,
+			options.Replace().SetUpsert(true))
+		if err != nil {
+			log.Printf("Cache write failed: %v", err)
+		} else {
+			log.Printf("Cache MISS — saved %d results for %q", len(results), cacheKey)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Cache", "MISS")
+	if useGraphQL {
+		w.Header().Set("X-API-Mode", "graphql")
+	} else {
+		w.Header().Set("X-API-Mode", "rest")
+	}
+	response := struct {
+		Results   []RepoResult `json:"results"`
+		HasMore   bool         `json:"has_more"`
+		Page      int          `json:"page"`
+		EndCursor string       `json:"end_cursor,omitempty"`
+	}{
+		Results:   results,
+		HasMore:   hasMore,
+		Page:      page,
+		EndCursor: endCursor,
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// restSearchRepos is the original REST-based search (N+1 API calls).
+// Used as fallback when GITHUB_TOKEN is not set.
+func restSearchRepos(ctx context.Context, q string, page int, liteMode bool) ([]RepoResult, bool) {
+	var client *github.Client
+	token := os.Getenv("GITHUB_TOKEN")
 	if token != "" {
 		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 		tc := oauth2.NewClient(ctx, ts)
@@ -185,15 +450,12 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 
 	result, resp, err := client.Search.Repositories(ctx, fullQuery, opts)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Search failed: %v", err), http.StatusInternalServerError)
-		return
+		log.Printf("REST search failed: %v", err)
+		return nil, false
 	}
-
-	liteMode := r.URL.Query().Get("lite") == "true"
 
 	var results []RepoResult
 	for _, repo := range result.Repositories {
-		// Skip repos with no open issues
 		if repo.GetOpenIssues() == 0 {
 			continue
 		}
@@ -217,40 +479,7 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hasMore := resp != nil && resp.NextPage > 0
-
-	// Save to cache
-	if cacheCollection != nil && len(results) > 0 {
-		cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		doc := CachedQuery{
-			Key:      cacheKey,
-			Results:  results,
-			CachedAt: time.Now(),
-		}
-		_, err := cacheCollection.ReplaceOne(cacheCtx, bson.M{"_id": cacheKey}, doc,
-			options.Replace().SetUpsert(true))
-		if err != nil {
-			log.Printf("Cache write failed: %v", err)
-		} else {
-			log.Printf("Cache MISS — saved %d results for %q", len(results), cacheKey)
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-Cache", "MISS")
-	response := struct {
-		Results []RepoResult `json:"results"`
-		HasMore bool         `json:"has_more"`
-		Page    int          `json:"page"`
-	}{
-		Results: results,
-		HasMore: hasMore,
-		Page:    page,
-	}
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
+	return results, hasMore
 }
 
 func processRepo(ctx context.Context, client *github.Client, repo *github.Repository) *RepoResult {

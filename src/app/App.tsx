@@ -34,6 +34,7 @@ export default function App() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [apiPage, setApiPage] = useState(1);
   const [hasMorePages, setHasMorePages] = useState(false);
+  const [apiCursor, setApiCursor] = useState<string | undefined>();
   const abortRef = useRef<AbortController | null>(null);
 
   const githubUser = userProfile?.username ?? null;
@@ -55,6 +56,7 @@ export default function App() {
     localStorage.removeItem("userProfile");
     setUserProfile(null);
     setSelectedSkills([]);
+    setApiCursor(undefined);
   };
 
   useEffect(() => {
@@ -78,6 +80,7 @@ export default function App() {
       setLoading(false);
       setApiPage(1);
       setHasMorePages(false);
+      setApiCursor(undefined);
       return;
     }
 
@@ -96,6 +99,7 @@ export default function App() {
           setApiPage(1);
           setHasMorePages(result.hasMore);
           setCurrentIndex(0);
+          setApiCursor(result.endCursor);
         }
       } catch (err: unknown) {
         if (!controller.signal.aborted) {
@@ -153,13 +157,14 @@ export default function App() {
     const nextPage = apiPage + 1;
     setLoadingMore(true);
     try {
-      const result = await fetchReposForSkills(selectedSkills, undefined, nextPage);
+      const result = await fetchReposForSkills(selectedSkills, undefined, nextPage, apiCursor);
       // Deduplicate by id
       const existingIds = new Set(apiIssues.map((i) => i.id));
       const newIssues = result.issues.filter((i) => !existingIds.has(i.id));
       setApiIssues((prev) => [...prev, ...newIssues]);
       setApiPage(nextPage);
       setHasMorePages(result.hasMore);
+      setApiCursor(result.endCursor);
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       const msg = err instanceof Error ? err.message : "Failed to fetch more";
@@ -167,7 +172,7 @@ export default function App() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, hasMorePages, apiPage, selectedSkills, apiIssues]);
+  }, [loadingMore, hasMorePages, apiPage, selectedSkills, apiIssues, apiCursor]);
 
   const handleGoBack = () => {
     setCurrentIndex((prev) => Math.max(0, prev - 6));
