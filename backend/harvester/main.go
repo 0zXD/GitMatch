@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/go-github/v50/github"
@@ -20,6 +21,8 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"golang.org/x/oauth2"
 )
+
+var repoApiCallCount uint64
 
 type RepoResult struct {
 	Name              string             `json:"name" bson:"name"`
@@ -202,6 +205,9 @@ func graphqlSearchRepos(ctx context.Context, token, query string, first int, aft
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
+	currentCount := atomic.AddUint64(&repoApiCallCount, 1)
+	log.Printf("Executing API Call #%d ", currentCount)
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("execute request: %w", err)
@@ -277,6 +283,7 @@ func main() {
 	initMongo()
 
 	http.HandleFunc("/harvest", corsMiddleware(handleHarvestRequest))
+	http.HandleFunc("/issues", corsMiddleware(handleIssuesRequest))
 	port := "8082"
 	fmt.Printf("Harvester server running on port %s...\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))

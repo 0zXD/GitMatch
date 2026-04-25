@@ -47,6 +47,31 @@ export default function App() {
       .map(([lang]) => lang);
   }, [userProfile]);
 
+  const userExperienceData = useMemo(() => {
+    if (!userProfile?.languages || selectedSkills.length === 0) return { level: "beginner" as const, count: 0 };
+    
+    // Find the max repo count among the relevant languages
+    let maxRepos = 0;
+    
+    // Create a lower-cased lookup map from the user's profile
+    const profileLookup = new Map<string, number>();
+    Object.entries(userProfile.languages).forEach(([lang, count]) => {
+      profileLookup.set(lang.toLowerCase(), count);
+    });
+
+    for (const skill of selectedSkills) {
+      const lowerSkill = skill.toLowerCase();
+      const count = profileLookup.get(lowerSkill) || 0;
+      if (count > maxRepos) {
+        maxRepos = count;
+      }
+    }
+
+    if (maxRepos <= 10) return { level: "beginner" as const, count: maxRepos };
+    if (maxRepos >= 10) return { level: "intermediate" as const, count: maxRepos };
+    return { level: "advanced" as const, count: maxRepos };
+  }, [userProfile, selectedSkills]);
+
   const handleLogin = (profile: UserProfile) => {
     localStorage.setItem("userProfile", JSON.stringify(profile));
     setUserProfile(profile);
@@ -93,7 +118,7 @@ export default function App() {
       setLoading(true);
       setApiError(null);
       try {
-        const result = await fetchReposForSkills(selectedSkills, controller.signal, 1);
+        const result = await fetchReposForSkills(selectedSkills, userExperienceData.level, userExperienceData.count, controller.signal, 1);
         if (!controller.signal.aborted) {
           setApiIssues(result.issues);
           setApiPage(1);
@@ -118,7 +143,7 @@ export default function App() {
       clearTimeout(debounce);
       controller.abort();
     };
-  }, [selectedSkills]);
+  }, [selectedSkills, userExperienceData]);
 
   const filteredIssues = useMemo(() => {
     if (selectedSkills.length > 0 && apiIssues.length > 0) {
@@ -157,7 +182,14 @@ export default function App() {
     const nextPage = apiPage + 1;
     setLoadingMore(true);
     try {
-      const result = await fetchReposForSkills(selectedSkills, undefined, nextPage, apiCursor);
+      const result = await fetchReposForSkills(
+        selectedSkills, 
+        userExperienceData.level, 
+        userExperienceData.count, 
+        undefined, 
+        nextPage, 
+        apiCursor
+      );
       // Deduplicate by id
       const existingIds = new Set(apiIssues.map((i) => i.id));
       const newIssues = result.issues.filter((i) => !existingIds.has(i.id));
@@ -172,7 +204,7 @@ export default function App() {
     } finally {
       setLoadingMore(false);
     }
-  }, [loadingMore, hasMorePages, apiPage, selectedSkills, apiIssues, apiCursor]);
+  }, [loadingMore, hasMorePages, apiPage, selectedSkills, apiIssues, apiCursor, userExperienceData]);
 
   const handleGoBack = () => {
     setCurrentIndex((prev) => Math.max(0, prev - 6));

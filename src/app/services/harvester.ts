@@ -151,8 +151,27 @@ export interface HarvestResult {
   endCursor?: string;
 }
 
+interface IssueResultApi {
+  id: number;
+  title: string;
+  url: string;
+  number: number;
+  state: string;
+  body: string;
+  comments: number;
+  labels: string[];
+  created_at: string;
+  name: string;
+  repo_url: string;
+  stars: number;
+  description: string;
+  primary_language: string;
+  language_breakdown?: Record<string, number>;
+  valid_tags?: string[];
+}
+
 interface HarvestResponse {
-  results: RepoResult[];
+  results: IssueResultApi[];
   has_more: boolean;
   page: number;
   end_cursor?: string;
@@ -160,6 +179,8 @@ interface HarvestResponse {
 
 export async function fetchReposForSkills(
   skills: string[],
+  experience: "beginner" | "intermediate" | "advanced" = "beginner",
+  repoCount: number = 0,
   signal?: AbortSignal,
   page: number = 1,
   cursor?: string,
@@ -167,21 +188,57 @@ export async function fetchReposForSkills(
   if (skills.length === 0) return { issues: [], hasMore: false, page: 1 };
 
   const query = buildSearchQuery(skills);
-  const params = new URLSearchParams({ q: query, page: String(page) });
+  const params = new URLSearchParams({ 
+    q: query, 
+    page: String(page),
+    experience: experience,
+    repoCount: String(repoCount)
+  });
   if (cursor) {
-    params.set("cursor", cursor);
+    params.append('after', cursor);
   }
-  const response = await fetch(`${HARVESTER_URL}/harvest?${params}`, { signal });
+  const response = await fetch(`${HARVESTER_URL}/issues?${params}`, { signal });
 
   if (!response.ok) {
     throw new Error(`Harvester API error: ${response.status}`);
   }
 
   const data: HarvestResponse = await response.json();
-  const repos = data.results ?? [];
-  const issues = repos
-    .filter((r) => r.open_issues > 0)
-    .map(repoToIssue);
+  const rawIssues = data.results ?? [];
+  const issues: GitHubIssue[] = rawIssues.map((apiIssue) => {
+    const lang = apiIssue.primary_language || "Open Source";
+    const languageTags = apiIssue.valid_tags?.length
+      ? apiIssue.valid_tags
+      : lang !== "Open Source"
+        ? [lang]
+        : [];
+
+    const apiLabels = apiIssue.labels || [];
+    let difficulty: "beginner" | "intermediate" | "advanced" = "intermediate";
+    const titleLower = apiIssue.title ? apiIssue.title.toLowerCase() : "";
+    const isBeginner = apiLabels.some((l) =>
+      l.toLowerCase().includes("good first") || l.toLowerCase().includes("beginner") || l.toLowerCase().includes("easy")
+    );
+    if (isBeginner || titleLower.includes("good first") || titleLower.includes("easy")) {
+      difficulty = "beginner";
+    }
+
+    return {
+      id: apiIssue.id || Math.random(),
+      title: apiIssue.title || "Untitled Issue",
+      repository: apiIssue.name || "Unknown Repo",
+      description: apiIssue.body ? apiIssue.body.substring(0, 150) + "..." : (apiIssue.description || "No description provided."),
+      labels: apiLabels.slice(0, 4),
+      language: lang,
+      stars: apiIssue.stars || 0,
+      forks: 0,
+      comments: apiIssue.comments || 0,
+      difficulty,
+      url: apiIssue.url || "#",
+      openIssues: 1, // This represents 1 specific issue now
+      languageTags,
+    };
+  });
 
   return {
     issues,
