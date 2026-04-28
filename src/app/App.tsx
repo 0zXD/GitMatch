@@ -6,7 +6,7 @@ import { GitHubLogin } from "./components/github-login";
 import { UserProfileOverview } from "./components/user-profile-overview";
 import { Button } from "./components/ui/button";
 import { Github, Sparkles, BookMarked, Search, Filter, Moon, Sun, LogOut, Loader2 } from "lucide-react";
-import { fetchReposForSkills, type HarvestResult } from "./services/harvester";
+import { fetchIssuesForSkills, type HarvestResult } from "./services/harvester";
 import { Input } from "./components/ui/input";
 import type { UserProfile } from "./types/user-profile";
 
@@ -72,17 +72,37 @@ export default function App() {
     return { level: "advanced" as const, count: maxRepos };
   }, [userProfile, selectedSkills]);
 
+  const loadSavedIssues = async (username: string) => {
+    try {
+      const res = await fetch(`http://localhost:8084/saved_issues?username=${encodeURIComponent(username)}`);
+      if (res.ok) {
+        const issues = await res.json();
+        setSavedIssues(issues);
+      }
+    } catch (err) {
+      console.error("Failed to fetch saved issues", err);
+    }
+  };
+
   const handleLogin = (profile: UserProfile) => {
     localStorage.setItem("userProfile", JSON.stringify(profile));
     setUserProfile(profile);
+    loadSavedIssues(profile.username);
   };
 
   const handleLogout = () => {
     localStorage.removeItem("userProfile");
     setUserProfile(null);
     setSelectedSkills([]);
+    setSavedIssues([]);
     setApiCursor(undefined);
   };
+
+  useEffect(() => {
+    if (userProfile) {
+      loadSavedIssues(userProfile.username);
+    }
+  }, [userProfile?.username]);
 
   useEffect(() => {
     // Check for saved preference
@@ -118,7 +138,7 @@ export default function App() {
       setLoading(true);
       setApiError(null);
       try {
-        const result = await fetchReposForSkills(selectedSkills, userExperienceData.level, userExperienceData.count, controller.signal, 1);
+        const result = await fetchIssuesForSkills(selectedSkills, userExperienceData.level, userExperienceData.count, controller.signal, 1);
         if (!controller.signal.aborted) {
           setApiIssues(result.issues);
           setApiPage(1);
@@ -161,16 +181,55 @@ export default function App() {
     setCurrentIndex(0);
   };
 
-  const handleInterested = (issue: GitHubIssue) => {
+  const handleInterested = async (issue: GitHubIssue) => {
+    if (!userProfile) return;
     setSavedIssues((prev) => [...prev, issue]);
+
+    // Save to PostgreSQL
+    try {
+      const res = await fetch("http://localhost:8084/saved_issues", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: userProfile.username,
+          issue_id: issue.id,
+          issue_data: issue,
+        }),
+      });
+      if (!res.ok) {
+        setSavedIssues((prev) => prev.filter((i) => i.id !== issue.id));
+      }
+    } catch (err) {
+      console.error("Failed to save issue to db", err);
+      setSavedIssues((prev) => prev.filter((i) => i.id !== issue.id));
+    }
   };
 
   const handleSkip = () => {
     // Just move to next issue
   };
 
-  const handleRemoveSaved = (id: number) => {
+  const handleRemoveSaved = async (id: number) => {
+    if (!userProfile) return;
+    const removedIssue = savedIssues.find((i) => i.id === id);
     setSavedIssues((prev) => prev.filter((issue) => issue.id !== id));
+
+    try {
+      const res = await fetch(
+        `http://localhost:8084/saved_issues?username=${encodeURIComponent(
+          userProfile.username
+        )}&issue_id=${id}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok && removedIssue) {
+        setSavedIssues((prev) => [...prev, removedIssue]);
+      }
+    } catch (err) {
+      console.error("Failed to delete issue from db", err);
+      if (removedIssue) {
+        setSavedIssues((prev) => [...prev, removedIssue]);
+      }
+    }
   };
 
   const handleLoadMore = () => {
@@ -182,7 +241,7 @@ export default function App() {
     const nextPage = apiPage + 1;
     setLoadingMore(true);
     try {
-      const result = await fetchReposForSkills(
+      const result = await fetchIssuesForSkills(
         selectedSkills, 
         userExperienceData.level, 
         userExperienceData.count, 
@@ -346,14 +405,14 @@ export default function App() {
                           {loading ? (
                             <span className="flex items-center gap-2">
                               <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              Searching GitHub repositories...
+                              Searching GitHub issues...
                             </span>
                           ) : apiError ? (
                             <span className="text-[#cf222e] dark:text-[#f85149]">
                               API unavailable — showing local results ({filteredIssues.length})
                             </span>
                           ) : (
-                            `Showing ${filteredIssues.length} matching ${filteredIssues.length === 1 ? "repository" : "repositories"}`
+                            `Showing ${filteredIssues.length} matching ${filteredIssues.length === 1 ? "issue" : "issues"}`
                           )}
                         </span>
                         <Button
@@ -440,7 +499,7 @@ export default function App() {
                       {hasMorePages ? (
                         <>
                           <p className="text-[#656d76] dark:text-[#8b949e] mb-3">
-                            You've seen all loaded results. Want to find more repositories?
+                            You've seen all loaded results. Want to find more issues?
                           </p>
                           <Button
                             onClick={handleFetchNextPage}
@@ -453,14 +512,14 @@ export default function App() {
                                 Fetching more…
                               </>
                             ) : (
-                              "Load More Repositories"
+                              "Load More Issues"
                             )}
                           </Button>
                         </>
                       ) : (
                         <>
                           <p className="text-[#656d76] dark:text-[#8b949e] mb-2">
-                            You've seen all available repositories matching your filters
+                            You've seen all available issues matching your filters
                           </p>
                           {currentIndex > 0 && (
                             <Button

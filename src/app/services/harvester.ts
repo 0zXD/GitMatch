@@ -177,7 +177,7 @@ interface HarvestResponse {
   end_cursor?: string;
 }
 
-export async function fetchReposForSkills(
+export async function fetchIssuesForSkills(
   skills: string[],
   experience: "beginner" | "intermediate" | "advanced" = "beginner",
   repoCount: number = 0,

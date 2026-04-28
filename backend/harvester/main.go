@@ -8,60 +8,56 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/go-github/v50/github"
-	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"golang.org/x/oauth2"
 )
 
-var repoApiCallCount uint64
+var issuesApiCallCount uint64
 
-type RepoResult struct {
-	Name              string             `json:"name" bson:"name"`
-	Stars             int                `json:"stars" bson:"stars"`
-	Forks             int                `json:"forks" bson:"forks"`
+type IssueResult struct {
+	ID                string             `json:"id" bson:"id"`
+	Title             string             `json:"title" bson:"title"`
 	URL               string             `json:"url" bson:"url"`
-	Description       string             `json:"description" bson:"description"`
+	Number            int                `json:"number" bson:"number"`
+	State             string             `json:"state" bson:"state"`
+	Body              string             `json:"body" bson:"body"`
+	Comments          int                `json:"comments" bson:"comments"`
+	Labels            []string           `json:"labels" bson:"labels"`
+	CreatedAt         time.Time          `json:"created_at" bson:"created_at"`
+	RepoName          string             `json:"name" bson:"repo_name"`
+	RepoURL           string             `json:"repo_url" bson:"repo_url"`
+	RepoStars         int                `json:"stars" bson:"repo_stars"`
+	RepoDescription   string             `json:"description" bson:"repo_description"`
 	PrimaryLanguage   string             `json:"primary_language" bson:"primary_language"`
-	OpenIssues        int                `json:"open_issues" bson:"open_issues"`
 	LanguageBreakdown map[string]float64 `json:"language_breakdown" bson:"language_breakdown"`
 	ValidTags         []string           `json:"valid_tags" bson:"valid_tags"`
 }
 
-type CachedQuery struct {
-	Key       string       `bson:"_id"`
-	Results   []RepoResult `bson:"results"`
-	HasMore   bool         `bson:"has_more"`
-	EndCursor string       `bson:"end_cursor"`
-	CachedAt  time.Time    `bson:"cached_at"`
+type CachedIssuesQuery struct {
+	Key       string        `bson:"_id"`
+	Results   []IssueResult `bson:"results"`
+	HasMore   bool          `bson:"has_more"`
+	EndCursor string        `bson:"end_cursor"`
+	CachedAt  time.Time     `bson:"cached_at"`
 }
 
-// GraphQL response types for GitHub API v4
-type graphQLResponse struct {
-	Data   graphQLData    `json:"data"`
-	Errors []graphQLError `json:"errors"`
-}
-
+// GraphQL response types for GitHub API v4 Issues
 type graphQLError struct {
 	Message string `json:"message"`
 }
 
-type graphQLData struct {
-	Search graphQLSearch `json:"search"`
+type graphQLIssueResponse struct {
+	Data   graphQLIssueData `json:"data"`
+	Errors []graphQLError   `json:"errors"`
 }
 
-type graphQLSearch struct {
-	RepositoryCount int             `json:"repositoryCount"`
-	PageInfo        graphQLPageInfo `json:"pageInfo"`
-	Nodes           []graphQLNode   `json:"nodes"`
+type graphQLIssueData struct {
+	Search graphQLIssueSearch `json:"search"`
 }
 
 type graphQLPageInfo struct {
@@ -69,105 +65,87 @@ type graphQLPageInfo struct {
 	EndCursor   string `json:"endCursor"`
 }
 
-type graphQLNode struct {
-	NameWithOwner   string `json:"nameWithOwner"`
-	StargazerCount  int    `json:"stargazerCount"`
-	ForkCount       int    `json:"forkCount"`
-	URL             string `json:"url"`
-	Description     string `json:"description"`
-	PrimaryLanguage *struct {
-		Name string `json:"name"`
-	} `json:"primaryLanguage"`
-	Issues struct {
+type graphQLIssueSearch struct {
+	IssueCount int                `json:"issueCount"`
+	PageInfo   graphQLPageInfo    `json:"pageInfo"`
+	Nodes      []graphQLIssueNode `json:"nodes"`
+}
+
+type graphQLIssueNode struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	URL       string    `json:"url"`
+	Number    int       `json:"number"`
+	State     string    `json:"state"`
+	BodyText  string    `json:"bodyText"`
+	CreatedAt time.Time `json:"createdAt"`
+	Comments  struct {
 		TotalCount int `json:"totalCount"`
-	} `json:"issues"`
-	Languages struct {
-		TotalSize int `json:"totalSize"`
-		Edges     []struct {
-			Size int `json:"size"`
-			Node struct {
-				Name string `json:"name"`
-			} `json:"node"`
-		} `json:"edges"`
-	} `json:"languages"`
+	} `json:"comments"`
+	Labels struct {
+		Nodes []struct {
+			Name string `json:"name"`
+		} `json:"nodes"`
+	} `json:"labels"`
+	Repository struct {
+		NameWithOwner   string `json:"nameWithOwner"`
+		StargazerCount  int    `json:"stargazerCount"`
+		URL             string `json:"url"`
+		Description     string `json:"description"`
+		PrimaryLanguage *struct {
+			Name string `json:"name"`
+		} `json:"primaryLanguage"`
+		Languages struct {
+			TotalSize int `json:"totalSize"`
+			Edges     []struct {
+				Size int `json:"size"`
+				Node struct {
+					Name string `json:"name"`
+				} `json:"node"`
+			} `json:"edges"`
+		} `json:"languages"`
+	} `json:"repository"`
 }
 
-var cacheCollection *mongo.Collection
-
-func initMongo() {
-	uri := os.Getenv("MONGODB_URI")
-	if uri == "" {
-		log.Println("MONGODB_URI not set — caching disabled")
-		return
-	}
-
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		log.Printf("MongoDB connection failed: %v — caching disabled", err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx, nil); err != nil {
-		log.Printf("MongoDB ping failed: %v — caching disabled", err)
-		return
-	}
-
-	dbName := os.Getenv("MONGODB_DB")
-	if dbName == "" {
-		dbName = "gitmatch"
-	}
-
-	cacheCollection = client.Database(dbName).Collection("harvest_cache")
-
-	// Create TTL index: entries expire after 24 hours
-	indexModel := mongo.IndexModel{
-		Keys:    bson.D{{Key: "cached_at", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(86400),
-	}
-	if _, err := cacheCollection.Indexes().CreateOne(ctx, indexModel); err != nil {
-		log.Printf("TTL index creation note: %v", err)
-	}
-
-	log.Println("MongoDB cache connected")
-}
-
-// normalizeCacheKey produces a stable key from a query string.
-// It extracts language:/topic: tokens, sorts them, and joins.
-func normalizeCacheKey(q string) string {
-	tokens := strings.Fields(q)
-	sort.Strings(tokens)
-	return strings.Join(tokens, " ")
-}
-
-const graphQLQueryTemplate = `query($query: String!, $first: Int!, $after: String) {
-  search(query: $query, type: REPOSITORY, first: $first, after: $after) {
-    repositoryCount
+const graphQLIssueQueryTemplate = `query($query: String!, $first: Int!, $after: String) {
+  search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
     pageInfo {
       hasNextPage
       endCursor
     }
     nodes {
-      ... on Repository {
-        nameWithOwner
-        stargazerCount
-        forkCount
+      ... on Issue {
+        id
+        title
         url
-        description
-        primaryLanguage {
-          name
-        }
-        issues(states: OPEN) {
+        number
+        state
+        bodyText
+        createdAt
+        comments {
           totalCount
         }
-        languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
-          totalSize
-          edges {
-            size
-            node {
-              name
+        labels(first: 10) {
+          nodes {
+            name
+          }
+        }
+        repository {
+          nameWithOwner
+          stargazerCount
+          url
+          description
+          primaryLanguage {
+            name
+          }
+          languages(first: 10, orderBy: {field: SIZE, direction: DESC}) {
+            totalSize
+            edges {
+              size
+              node {
+                name
+              }
             }
           }
         }
@@ -176,9 +154,7 @@ const graphQLQueryTemplate = `query($query: String!, $first: Int!, $after: Strin
   }
 }`
 
-// graphqlSearchRepos executes a single GraphQL query that fetches repos + languages
-// in one API call, replacing the N+1 REST calls (1 search + N language fetches).
-func graphqlSearchRepos(ctx context.Context, token, query string, first int, after string) (*graphQLSearch, error) {
+func graphqlSearchIssues(ctx context.Context, token, query string, first int, after string) (*graphQLIssueSearch, error) {
 	variables := map[string]interface{}{
 		"query": query,
 		"first": first,
@@ -188,7 +164,7 @@ func graphqlSearchRepos(ctx context.Context, token, query string, first int, aft
 	}
 
 	body := map[string]interface{}{
-		"query":     graphQLQueryTemplate,
+		"query":     graphQLIssueQueryTemplate,
 		"variables": variables,
 	}
 
@@ -205,7 +181,7 @@ func graphqlSearchRepos(ctx context.Context, token, query string, first int, aft
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
-	currentCount := atomic.AddUint64(&repoApiCallCount, 1)
+	currentCount := atomic.AddUint64(&issuesApiCallCount, 1)
 	log.Printf("Executing API Call #%d ", currentCount)
 
 	resp, err := http.DefaultClient.Do(req)
@@ -218,7 +194,7 @@ func graphqlSearchRepos(ctx context.Context, token, query string, first int, aft
 		return nil, fmt.Errorf("graphql request failed with status %d", resp.StatusCode)
 	}
 
-	var gqlResp graphQLResponse
+	var gqlResp graphQLIssueResponse
 	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
@@ -230,86 +206,77 @@ func graphqlSearchRepos(ctx context.Context, token, query string, first int, aft
 	return &gqlResp.Data.Search, nil
 }
 
-// graphqlNodeToResult converts a GraphQL repository node to a RepoResult,
-// extracting language breakdown from the same response (no extra API call).
-func graphqlNodeToResult(node graphQLNode) *RepoResult {
-	if node.Issues.TotalCount == 0 {
+func graphqlIssueNodeToResult(node graphQLIssueNode) *IssueResult {
+	if node.Repository.NameWithOwner == "" {
 		return nil
 	}
 
 	primaryLang := ""
-	if node.PrimaryLanguage != nil {
-		primaryLang = node.PrimaryLanguage.Name
+	if node.Repository.PrimaryLanguage != nil {
+		primaryLang = node.Repository.PrimaryLanguage.Name
 	}
 
-	totalBytes := node.Languages.TotalSize
-	if totalBytes == 0 {
-		return nil
-	}
-
+	totalBytes := node.Repository.Languages.TotalSize
 	breakdown := make(map[string]float64)
 	var validTags []string
-	for _, edge := range node.Languages.Edges {
-		percentage := (float64(edge.Size) / float64(totalBytes)) * 100
-		breakdown[edge.Node.Name] = percentage
-		if percentage >= 10.0 {
-			validTags = append(validTags, edge.Node.Name)
+
+	if totalBytes > 0 {
+		for _, edge := range node.Repository.Languages.Edges {
+			percentage := (float64(edge.Size) / float64(totalBytes)) * 100
+			breakdown[edge.Node.Name] = percentage
+			if percentage >= 10.0 {
+				validTags = append(validTags, edge.Node.Name)
+			}
 		}
 	}
 
-	if len(validTags) == 0 {
-		return nil
+	var labels []string
+	for _, l := range node.Labels.Nodes {
+		labels = append(labels, l.Name)
 	}
 
-	return &RepoResult{
-		Name:              node.NameWithOwner,
-		Stars:             node.StargazerCount,
-		Forks:             node.ForkCount,
+	bodyStr := node.BodyText
+	if len(bodyStr) > 500 {
+		bodyStr = bodyStr[:500] + "..."
+	}
+
+	return &IssueResult{
+		ID:                node.ID,
+		Title:             node.Title,
 		URL:               node.URL,
-		Description:       node.Description,
+		Number:            node.Number,
+		State:             node.State,
+		Body:              bodyStr,
+		Comments:          node.Comments.TotalCount,
+		Labels:            labels,
+		CreatedAt:         node.CreatedAt,
+		RepoName:          node.Repository.NameWithOwner,
+		RepoURL:           node.Repository.URL,
+		RepoStars:         node.Repository.StargazerCount,
+		RepoDescription:   node.Repository.Description,
 		PrimaryLanguage:   primaryLang,
-		OpenIssues:        node.Issues.TotalCount,
 		LanguageBreakdown: breakdown,
 		ValidTags:         validTags,
 	}
 }
 
-func main() {
-	// Try to load .env from current directory, back up to parent if missing
-	if err := godotenv.Load(); err != nil {
-		_ = godotenv.Load("../.env")
-	}
-
-	initMongo()
-
-	http.HandleFunc("/harvest", corsMiddleware(handleHarvestRequest))
-	http.HandleFunc("/issues", corsMiddleware(handleIssuesRequest))
-	port := "8082"
-	fmt.Printf("Harvester server running on port %s...\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next(w, r)
-	}
-}
-
-func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
+func handleIssuesRequest(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
 		topic := r.URL.Query().Get("topic")
-		if topic != "" {
-			q = fmt.Sprintf("topic:%s", topic)
+		lang := r.URL.Query().Get("language")
+
+		if topic != "" || lang != "" {
+			var queryParts []string
+			if topic != "" {
+				queryParts = append(queryParts, fmt.Sprintf("topic:%s", topic))
+			}
+			if lang != "" {
+				queryParts = append(queryParts, fmt.Sprintf("language:%s", lang))
+			}
+			q = strings.Join(queryParts, " ")
 		} else {
-			http.Error(w, "Missing 'q' or 'topic' query parameter", http.StatusBadRequest)
+			http.Error(w, "Missing search parameters", http.StatusBadRequest)
 			return
 		}
 	}
@@ -321,34 +288,44 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cursor := r.URL.Query().Get("cursor")
-	token := os.Getenv("GITHUB_TOKEN")
-	useGraphQL := token != ""
-
-	// Build cache key: GraphQL uses cursor-based, REST uses page-based
-	var cacheKey string
-	if useGraphQL {
-		cacheKey = fmt.Sprintf("gql|%s|cursor=%s", normalizeCacheKey(q), cursor)
-	} else {
-		cacheKey = fmt.Sprintf("%s|page=%d", normalizeCacheKey(q), page)
+	experience := r.URL.Query().Get("experience")
+	if experience == "" {
+		experience = "beginner"
+	}
+	repoCountStr := r.URL.Query().Get("repoCount")
+	if repoCountStr == "" {
+		repoCountStr = "0"
 	}
 
-	// Try cache first
+	var issueQualifiers string
+	if experience == "beginner" {
+		issueQualifiers = "is:issue is:open label:\"good first issue\""
+	} else if experience == "intermediate" {
+		issueQualifiers = "is:issue is:open label:\"help wanted\""
+	} else {
+		issueQualifiers = "is:issue is:open"
+	}
+
+	fullQuery := fmt.Sprintf("%s %s", q, issueQualifiers)
+
+	cursor := r.URL.Query().Get("after")
+	cacheKey := fmt.Sprintf("issues|%s|exp=%s|repos=%s|page=%d|after=%s", normalizeCacheKey(fullQuery), experience, repoCountStr, page, cursor)
+
 	if cacheCollection != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		var cached CachedQuery
+		var cached CachedIssuesQuery
 		err := cacheCollection.FindOne(ctx, bson.M{"_id": cacheKey}).Decode(&cached)
 		if err == nil {
 			log.Printf("Cache HIT for %q", cacheKey)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Cache", "HIT")
 			json.NewEncoder(w).Encode(struct {
-				Results   []RepoResult `json:"results"`
-				HasMore   bool         `json:"has_more"`
-				Page      int          `json:"page"`
-				EndCursor string       `json:"end_cursor,omitempty"`
+				Results   []IssueResult `json:"results"`
+				HasMore   bool          `json:"has_more"`
+				Page      int           `json:"page"`
+				EndCursor string        `json:"end_cursor"`
 			}{
 				Results:   cached.Results,
 				HasMore:   cached.HasMore,
@@ -359,49 +336,42 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var results []RepoResult
-	var hasMore bool
-	var endCursor string
-
-	if useGraphQL {
-		// GraphQL path: 1 API call replaces N+1 REST calls
-		log.Printf("GraphQL search: %q (cursor=%q)", q, cursor)
-		fullQuery := fmt.Sprintf("%s stars:>0 sort:updated-desc", q)
-
-		searchResult, err := graphqlSearchRepos(r.Context(), token, fullQuery, 30, cursor)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("GraphQL search failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		for _, node := range searchResult.Nodes {
-			if res := graphqlNodeToResult(node); res != nil {
-				results = append(results, *res)
-			}
-		}
-		hasMore = searchResult.PageInfo.HasNextPage
-		endCursor = searchResult.PageInfo.EndCursor
-		log.Printf("GraphQL returned %d repos → %d valid results (1 API call)", len(searchResult.Nodes), len(results))
-	} else {
-		// REST fallback: N+1 API calls (no token = no GraphQL)
-		log.Println("REST fallback (no GITHUB_TOKEN set — consider adding one for GraphQL efficiency)")
-		results, hasMore = restSearchRepos(r.Context(), q, page, r.URL.Query().Get("lite") == "true")
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		http.Error(w, "GITHUB_TOKEN not configured", http.StatusInternalServerError)
+		return
 	}
 
-	// Save to cache
+	ctx := context.Background()
+	searchData, err := graphqlSearchIssues(ctx, token, fullQuery, 30, cursor)
+	if err != nil {
+		log.Printf("GraphQL search failed: %v", err)
+		http.Error(w, fmt.Sprintf("Search failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var results []IssueResult
+	for _, node := range searchData.Nodes {
+		if res := graphqlIssueNodeToResult(node); res != nil {
+			results = append(results, *res)
+		}
+	}
+
+	hasMore := searchData.PageInfo.HasNextPage
+	endCursor := searchData.PageInfo.EndCursor
+
 	if cacheCollection != nil && len(results) > 0 {
 		cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		doc := CachedQuery{
+		doc := CachedIssuesQuery{
 			Key:       cacheKey,
 			Results:   results,
 			HasMore:   hasMore,
 			EndCursor: endCursor,
 			CachedAt:  time.Now(),
 		}
-		_, err := cacheCollection.ReplaceOne(cacheCtx, bson.M{"_id": cacheKey}, doc,
-			options.Replace().SetUpsert(true))
+		_, err := cacheCollection.ReplaceOne(cacheCtx, bson.M{"_id": cacheKey}, doc, options.Replace().SetUpsert(true))
 		if err != nil {
 			log.Printf("Cache write failed: %v", err)
 		} else {
@@ -411,122 +381,15 @@ func handleHarvestRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Cache", "MISS")
-	if useGraphQL {
-		w.Header().Set("X-API-Mode", "graphql")
-	} else {
-		w.Header().Set("X-API-Mode", "rest")
-	}
-	response := struct {
-		Results   []RepoResult `json:"results"`
-		HasMore   bool         `json:"has_more"`
-		Page      int          `json:"page"`
-		EndCursor string       `json:"end_cursor,omitempty"`
+	json.NewEncoder(w).Encode(struct {
+		Results   []IssueResult `json:"results"`
+		HasMore   bool          `json:"has_more"`
+		Page      int           `json:"page"`
+		EndCursor string        `json:"end_cursor"`
 	}{
 		Results:   results,
 		HasMore:   hasMore,
 		Page:      page,
 		EndCursor: endCursor,
-	}
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-	}
-}
-
-// restSearchRepos is the original REST-based search (N+1 API calls).
-// Used as fallback when GITHUB_TOKEN is not set.
-func restSearchRepos(ctx context.Context, q string, page int, liteMode bool) ([]RepoResult, bool) {
-	var client *github.Client
-	token := os.Getenv("GITHUB_TOKEN")
-	if token != "" {
-		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-		tc := oauth2.NewClient(ctx, ts)
-		client = github.NewClient(tc)
-	} else {
-		client = github.NewClient(nil)
-	}
-
-	fullQuery := fmt.Sprintf("%s stars:>0", q)
-	opts := &github.SearchOptions{
-		Sort:  "updated",
-		Order: "desc",
-		ListOptions: github.ListOptions{
-			Page:    page,
-			PerPage: 30,
-		},
-	}
-
-	result, resp, err := client.Search.Repositories(ctx, fullQuery, opts)
-	if err != nil {
-		log.Printf("REST search failed: %v", err)
-		return nil, false
-	}
-
-	var results []RepoResult
-	for _, repo := range result.Repositories {
-		if repo.GetOpenIssues() == 0 {
-			continue
-		}
-
-		if liteMode {
-			results = append(results, RepoResult{
-				Name:            repo.GetFullName(),
-				Stars:           repo.GetStargazersCount(),
-				Forks:           repo.GetForksCount(),
-				URL:             repo.GetHTMLURL(),
-				Description:     repo.GetDescription(),
-				PrimaryLanguage: repo.GetLanguage(),
-				OpenIssues:      repo.GetOpenIssues(),
-			})
-		} else {
-			res := processRepo(ctx, client, repo)
-			if res != nil {
-				results = append(results, *res)
-			}
-		}
-	}
-
-	hasMore := resp != nil && resp.NextPage > 0
-	return results, hasMore
-}
-
-func processRepo(ctx context.Context, client *github.Client, repo *github.Repository) *RepoResult {
-	langs, _, err := client.Repositories.ListLanguages(ctx, repo.GetOwner().GetLogin(), repo.GetName())
-	if err != nil {
-		log.Printf("Skipping %s: %v", repo.GetFullName(), err)
-		return nil
-	}
-
-	validTags := []string{}
-	totalBytes := 0
-	for _, bytes := range langs {
-		totalBytes += bytes
-	}
-
-	if totalBytes == 0 {
-		return nil
-	}
-
-	breakdown := make(map[string]float64)
-	for lang, bytes := range langs {
-		percentage := (float64(bytes) / float64(totalBytes)) * 100
-		breakdown[lang] = percentage
-		if percentage >= 10.0 {
-			validTags = append(validTags, lang)
-		}
-	}
-
-	if len(validTags) > 0 {
-		return &RepoResult{
-			Name:              repo.GetFullName(),
-			Stars:             repo.GetStargazersCount(),
-			Forks:             repo.GetForksCount(),
-			URL:               repo.GetHTMLURL(),
-			Description:       repo.GetDescription(),
-			PrimaryLanguage:   repo.GetLanguage(),
-			OpenIssues:        repo.GetOpenIssues(),
-			LanguageBreakdown: breakdown,
-			ValidTags:         validTags,
-		}
-	}
-	return nil
+	})
 }
