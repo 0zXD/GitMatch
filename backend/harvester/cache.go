@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -18,7 +16,17 @@ import (
 
 var cacheCollection *mongo.Collection
 
+func loadEnvFiles() {
+	for _, file := range []string{".env", "../.env", "../../.env", "backend/.env", "../backend/.env"} {
+		if err := godotenv.Load(file); err == nil {
+			return
+		}
+	}
+}
+
 func initMongo() {
+	loadEnvFiles()
+
 	uri := os.Getenv("MONGODB_URI")
 	if uri == "" {
 		log.Println("MONGODB_URI not set — caching disabled")
@@ -64,31 +72,4 @@ func normalizeCacheKey(q string) string {
 	tokens := strings.Fields(q)
 	sort.Strings(tokens)
 	return strings.Join(tokens, " ")
-}
-
-func main() {
-	// Try to load .env from current directory, back up to parent if missing
-	if err := godotenv.Load(); err != nil {
-		_ = godotenv.Load("../.env")
-	}
-
-	initMongo()
-
-	http.HandleFunc("/issues", corsMiddleware(handleIssuesRequest))
-	port := "8082"
-	fmt.Printf("Harvester server running on port %s...\n", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
-}
-
-func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		next(w, r)
-	}
 }

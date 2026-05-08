@@ -1,18 +1,21 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { IssueCard, GitHubIssue } from "./components/issue-card";
+import { useState, useMemo, useEffect } from "react";
+import { IssueCard } from "./components/issue-card";
 import { SkillSelector } from "./components/skill-selector";
 import { SavedIssues } from "./components/saved-issues";
 import { GitHubLogin } from "./components/github-login";
 import { UserProfileOverview } from "./components/user-profile-overview";
 import { Button } from "./components/ui/button";
 import { Github, Sparkles, BookMarked, Search, Filter, Moon, Sun, LogOut, Loader2 } from "lucide-react";
-import { fetchIssuesForSkills, type HarvestResult } from "./services/harvester";
 import { Input } from "./components/ui/input";
 import type { UserProfile } from "./types/user-profile";
 
+import { useGitHubIssues } from "./hooks/useGitHubIssues";
+import { useSavedIssues } from "./hooks/useSavedIssues";
+import { useUserExperience } from "./hooks/useUserExperience";
+import { useDarkMode } from "./hooks/useDarkMode";
+
 export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(() => {
-    // Clean up old login key from previous implementation
     localStorage.removeItem("githubUser");
     const stored = localStorage.getItem("userProfile");
     try {
@@ -22,67 +25,32 @@ export default function App() {
       return null;
     }
   });
+
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [savedIssues, setSavedIssues] = useState<GitHubIssue[]>([]);
   const [activeTab, setActiveTab] = useState<"discover" | "saved">("discover");
   const [showSkillSelector, setShowSkillSelector] = useState(false);
-  const [darkMode, setDarkMode] = useState(false);
-  const [apiIssues, setApiIssues] = useState<GitHubIssue[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [apiError, setApiError] = useState<string | null>(null);
-  const [apiPage, setApiPage] = useState(1);
-  const [hasMorePages, setHasMorePages] = useState(false);
-  const [apiCursor, setApiCursor] = useState<string | undefined>();
-  const abortRef = useRef<AbortController | null>(null);
+
+  const { darkMode, toggleDarkMode } = useDarkMode();
+  const { userLanguages, userExperienceData } = useUserExperience(userProfile, selectedSkills);
+  
+  const { savedIssues, loadSavedIssues, handleInterested, handleRemoveSaved, setSavedIssues } = useSavedIssues(userProfile);
+  
+  const { 
+    apiIssues, loading, loadingMore, apiError, hasMorePages, loadMoreIssues, setApiIssues 
+  } = useGitHubIssues({
+    selectedSkills,
+    level: userExperienceData.level,
+    count: userExperienceData.count
+  });
 
   const githubUser = userProfile?.username ?? null;
 
-  // Derive sorted user languages from profile (most-used first)
-  const userLanguages = useMemo(() => {
-    if (!userProfile?.languages) return [];
-    return Object.entries(userProfile.languages)
-      .sort(([, a], [, b]) => b - a)
-      .map(([lang]) => lang);
-  }, [userProfile]);
-
-  const userExperienceData = useMemo(() => {
-    if (!userProfile?.languages || selectedSkills.length === 0) return { level: "beginner" as const, count: 0 };
-    
-    // Find the max repo count among the relevant languages
-    let maxRepos = 0;
-    
-    // Create a lower-cased lookup map from the user's profile
-    const profileLookup = new Map<string, number>();
-    Object.entries(userProfile.languages).forEach(([lang, count]) => {
-      profileLookup.set(lang.toLowerCase(), count);
-    });
-
-    for (const skill of selectedSkills) {
-      const lowerSkill = skill.toLowerCase();
-      const count = profileLookup.get(lowerSkill) || 0;
-      if (count > maxRepos) {
-        maxRepos = count;
-      }
+  useEffect(() => {
+    if (userProfile) {
+      loadSavedIssues(userProfile.username);
     }
-
-    if (maxRepos <= 10) return { level: "beginner" as const, count: maxRepos };
-    if (maxRepos >= 10) return { level: "intermediate" as const, count: maxRepos };
-    return { level: "advanced" as const, count: maxRepos };
-  }, [userProfile, selectedSkills]);
-
-  const loadSavedIssues = async (username: string) => {
-    try {
-      const res = await fetch(`http://localhost:8084/saved_issues?username=${encodeURIComponent(username)}`);
-      if (res.ok) {
-        const issues = await res.json();
-        setSavedIssues(issues);
-      }
-    } catch (err) {
-      console.error("Failed to fetch saved issues", err);
-    }
-  };
+  }, [userProfile?.username, loadSavedIssues]);
 
   const handleLogin = (profile: UserProfile) => {
     localStorage.setItem("userProfile", JSON.stringify(profile));
@@ -95,75 +63,8 @@ export default function App() {
     setUserProfile(null);
     setSelectedSkills([]);
     setSavedIssues([]);
-    setApiCursor(undefined);
+    setApiIssues([]);
   };
-
-  useEffect(() => {
-    if (userProfile) {
-      loadSavedIssues(userProfile.username);
-    }
-  }, [userProfile?.username]);
-
-  useEffect(() => {
-    // Check for saved preference
-    const savedMode = localStorage.getItem("darkMode");
-    if (savedMode === "true") {
-      setDarkMode(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    // Save preference
-    localStorage.setItem("darkMode", darkMode.toString());
-  }, [darkMode]);
-
-  // Fetch repos from harvester API when skills change
-  useEffect(() => {
-    if (selectedSkills.length === 0) {
-      setApiIssues([]);
-      setApiError(null);
-      setLoading(false);
-      setApiPage(1);
-      setHasMorePages(false);
-      setApiCursor(undefined);
-      return;
-    }
-
-    // Abort any in-flight request
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    const debounce = setTimeout(async () => {
-      setLoading(true);
-      setApiError(null);
-      try {
-        const result = await fetchIssuesForSkills(selectedSkills, userExperienceData.level, userExperienceData.count, controller.signal, 1);
-        if (!controller.signal.aborted) {
-          setApiIssues(result.issues);
-          setApiPage(1);
-          setHasMorePages(result.hasMore);
-          setCurrentIndex(0);
-          setApiCursor(result.endCursor);
-        }
-      } catch (err: unknown) {
-        if (!controller.signal.aborted) {
-          const msg = err instanceof Error ? err.message : "Failed to fetch";
-          if (err instanceof DOMException && err.name === "AbortError") return;
-          setApiError(msg);
-        }
-      } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
-      }
-    }, 500);
-
-    return () => {
-      clearTimeout(debounce);
-      controller.abort();
-    };
-  }, [selectedSkills, userExperienceData]);
 
   const filteredIssues = useMemo(() => {
     if (selectedSkills.length > 0 && apiIssues.length > 0) {
@@ -181,97 +82,11 @@ export default function App() {
     setCurrentIndex(0);
   };
 
-  const handleInterested = async (issue: GitHubIssue) => {
-    if (!userProfile) return;
-    setSavedIssues((prev) => [...prev, issue]);
-
-    // Save to PostgreSQL
-    try {
-      const res = await fetch("http://localhost:8084/saved_issues", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username: userProfile.username,
-          issue_id: issue.id,
-          issue_data: issue,
-        }),
-      });
-      if (!res.ok) {
-        setSavedIssues((prev) => prev.filter((i) => i.id !== issue.id));
-      }
-    } catch (err) {
-      console.error("Failed to save issue to db", err);
-      setSavedIssues((prev) => prev.filter((i) => i.id !== issue.id));
-    }
-  };
-
-  const handleSkip = () => {
-    // Just move to next issue
-  };
-
-  const handleRemoveSaved = async (id: number) => {
-    if (!userProfile) return;
-    const removedIssue = savedIssues.find((i) => i.id === id);
-    setSavedIssues((prev) => prev.filter((issue) => issue.id !== id));
-
-    try {
-      const res = await fetch(
-        `http://localhost:8084/saved_issues?username=${encodeURIComponent(
-          userProfile.username
-        )}&issue_id=${id}`,
-        { method: "DELETE" }
-      );
-      if (!res.ok && removedIssue) {
-        setSavedIssues((prev) => [...prev, removedIssue]);
-      }
-    } catch (err) {
-      console.error("Failed to delete issue from db", err);
-      if (removedIssue) {
-        setSavedIssues((prev) => [...prev, removedIssue]);
-      }
-    }
-  };
-
-  const handleLoadMore = () => {
-    setCurrentIndex((prev) => prev + 6);
-  };
-
-  const handleFetchNextPage = useCallback(async () => {
-    if (loadingMore || !hasMorePages) return;
-    const nextPage = apiPage + 1;
-    setLoadingMore(true);
-    try {
-      const result = await fetchIssuesForSkills(
-        selectedSkills, 
-        userExperienceData.level, 
-        userExperienceData.count, 
-        undefined, 
-        nextPage, 
-        apiCursor
-      );
-      // Deduplicate by id
-      const existingIds = new Set(apiIssues.map((i) => i.id));
-      const newIssues = result.issues.filter((i) => !existingIds.has(i.id));
-      setApiIssues((prev) => [...prev, ...newIssues]);
-      setApiPage(nextPage);
-      setHasMorePages(result.hasMore);
-      setApiCursor(result.endCursor);
-    } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
-      const msg = err instanceof Error ? err.message : "Failed to fetch more";
-      setApiError(msg);
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [loadingMore, hasMorePages, apiPage, selectedSkills, apiIssues, apiCursor, userExperienceData]);
-
   const handleGoBack = () => {
     setCurrentIndex((prev) => Math.max(0, prev - 6));
   };
 
-  const toggleDarkMode = () => {
-    setDarkMode(!darkMode);
-  };
+  const handleSkip = () => {};
 
   if (!userProfile) {
     return <GitHubLogin onSubmit={handleLogin} />;
@@ -280,7 +95,6 @@ export default function App() {
   return (
     <div className={darkMode ? "dark" : ""}>
       <div className="min-h-screen bg-[#f6f8fa] dark:bg-[#0d1117] transition-colors">
-        {/* Header - GitHub Style */}
         <header className="bg-[#24292f] border-b border-[#d0d7de] dark:border-[#30363d]">
           <div className="max-w-7xl mx-auto px-4 py-3">
             <div className="flex items-center justify-between">
@@ -301,13 +115,8 @@ export default function App() {
                 <button
                   onClick={toggleDarkMode}
                   className="p-2 rounded-lg hover:bg-[#30363d] transition-colors"
-                  aria-label="Toggle dark mode"
                 >
-                  {darkMode ? (
-                    <Sun className="w-5 h-5 text-[#f0883e]" />
-                  ) : (
-                    <Moon className="w-5 h-5 text-[#8b949e]" />
-                  )}
+                  {darkMode ? <Sun className="w-5 h-5 text-[#f0883e]" /> : <Moon className="w-5 h-5 text-[#8b949e]" />}
                 </button>
                 <div className="flex items-center gap-2 bg-[#21262d] text-[#e6edf3] px-3 py-1.5 rounded-full text-sm font-medium">
                   <img
@@ -321,12 +130,7 @@ export default function App() {
                 <div className="bg-[#0969da] text-white px-3 py-1.5 rounded-full text-sm font-medium">
                   {savedIssues.length} Saved
                 </div>
-                <button
-                  onClick={handleLogout}
-                  className="p-2 rounded-lg hover:bg-[#30363d] transition-colors"
-                  aria-label="Log out"
-                  title="Log out"
-                >
+                <button onClick={handleLogout} className="p-2 rounded-lg hover:bg-[#30363d] transition-colors">
                   <LogOut className="w-5 h-5 text-[#8b949e]" />
                 </button>
               </div>
@@ -334,16 +138,13 @@ export default function App() {
           </div>
         </header>
 
-        {/* Navigation Tabs */}
         <div className="bg-white dark:bg-[#0d1117] border-b border-[#d0d7de] dark:border-[#30363d] transition-colors">
           <div className="max-w-7xl mx-auto px-4">
             <div className="flex items-center gap-4">
               <button
                 onClick={() => setActiveTab("discover")}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === "discover"
-                    ? "border-[#fd8c73] text-[#24292f] dark:text-[#e6edf3]"
-                    : "border-transparent text-[#656d76] dark:text-[#8b949e] hover:text-[#24292f] dark:hover:text-[#e6edf3] hover:border-[#d0d7de] dark:hover:border-[#30363d]"
+                  activeTab === "discover" ? "border-[#fd8c73] text-[#24292f] dark:text-[#e6edf3]" : "border-transparent text-[#656d76] dark:text-[#8b949e] hover:text-[#24292f] dark:hover:text-[#e6edf3]"
                 }`}
               >
                 <Sparkles className="inline w-4 h-4 mr-2" />
@@ -352,9 +153,7 @@ export default function App() {
               <button
                 onClick={() => setActiveTab("saved")}
                 className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === "saved"
-                    ? "border-[#fd8c73] text-[#24292f] dark:text-[#e6edf3]"
-                    : "border-transparent text-[#656d76] dark:text-[#8b949e] hover:text-[#24292f] dark:hover:text-[#e6edf3] hover:border-[#d0d7de] dark:hover:border-[#30363d]"
+                  activeTab === "saved" ? "border-[#fd8c73] text-[#24292f] dark:text-[#e6edf3]" : "border-transparent text-[#656d76] dark:text-[#8b949e] hover:text-[#24292f] dark:hover:text-[#e6edf3]"
                 }`}
               >
                 <BookMarked className="inline w-4 h-4 mr-2" />
@@ -367,7 +166,6 @@ export default function App() {
         <main className="max-w-7xl mx-auto px-4 py-6">
           {activeTab === "discover" ? (
             <div>
-              {/* Filter Bar */}
               <div className="bg-white dark:bg-[#161b22] rounded-lg border border-[#d0d7de] dark:border-[#30363d] p-4 mb-6 transition-colors">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
@@ -375,11 +173,7 @@ export default function App() {
                     <span className="text-sm font-semibold text-[#24292f] dark:text-[#e6edf3]">
                       Filter by your skills
                     </span>
-                    {selectedSkills.length > 0 && (
-                      <span className="text-xs text-[#656d76] dark:text-[#8b949e]">
-                        ({selectedSkills.length} selected)
-                      </span>
-                    )}
+                    {selectedSkills.length > 0 && <span className="text-xs text-[#656d76] dark:text-[#8b949e]">({selectedSkills.length} selected)</span>}
                   </div>
                   <Button
                     onClick={() => setShowSkillSelector(!showSkillSelector)}
@@ -393,64 +187,32 @@ export default function App() {
 
                 {showSkillSelector && (
                   <div className="pt-3 border-t border-[#d0d7de] dark:border-[#30363d]">
-                    <SkillSelector
-                      selectedSkills={selectedSkills}
-                      onSkillToggle={handleSkillToggle}
-                      darkMode={darkMode}
-                      userLanguages={userLanguages}
-                    />
+                    <SkillSelector selectedSkills={selectedSkills} onSkillToggle={handleSkillToggle} darkMode={darkMode} userLanguages={userLanguages} />
                     {selectedSkills.length > 0 && (
                       <div className="mt-3 flex items-center justify-between">
                         <span className="text-sm text-[#656d76] dark:text-[#8b949e]">
                           {loading ? (
-                            <span className="flex items-center gap-2">
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              Searching GitHub issues...
-                            </span>
+                            <span className="flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Searching GitHub...</span>
                           ) : apiError ? (
-                            <span className="text-[#cf222e] dark:text-[#f85149]">
-                              API unavailable — showing local results ({filteredIssues.length})
-                            </span>
+                            <span className="text-[#cf222e] dark:text-[#f85149]">API unavailable — local results ({filteredIssues.length})</span>
                           ) : (
-                            `Showing ${filteredIssues.length} matching ${filteredIssues.length === 1 ? "issue" : "issues"}`
+                            `Showing ${filteredIssues.length} matching issues`
                           )}
                         </span>
-                        <Button
-                          onClick={() => setSelectedSkills([])}
-                          variant="link"
-                          size="sm"
-                          className="text-[#0969da] dark:text-[#58a6ff]"
-                        >
-                          Clear all filters
-                        </Button>
+                        <Button onClick={() => setSelectedSkills([])} variant="link" size="sm" className="text-[#0969da] dark:text-[#58a6ff]">Clear all</Button>
                       </div>
                     )}
                   </div>
                 )}
               </div>
 
-              {/* Issue Grid */}
               {selectedSkills.length === 0 && userProfile ? (
                 <UserProfileOverview profile={userProfile} darkMode={darkMode} />
               ) : loading ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                   {Array.from({ length: 4 }).map((_, i) => (
-                    <div
-                      key={i}
-                      className="rounded-lg border bg-white dark:bg-[#161b22] border-[#d0d7de] dark:border-[#30363d] p-6 animate-pulse"
-                    >
+                    <div key={i} className="rounded-lg border bg-white dark:bg-[#161b22] border-[#d0d7de] dark:border-[#30363d] p-6 animate-pulse">
                       <div className="h-4 bg-[#d0d7de] dark:bg-[#30363d] rounded w-1/3 mb-3"></div>
-                      <div className="h-5 bg-[#d0d7de] dark:bg-[#30363d] rounded w-3/4 mb-4"></div>
-                      <div className="h-3 bg-[#d0d7de] dark:bg-[#30363d] rounded w-full mb-2"></div>
-                      <div className="h-3 bg-[#d0d7de] dark:bg-[#30363d] rounded w-2/3 mb-4"></div>
-                      <div className="flex gap-2 mb-4">
-                        <div className="h-5 bg-[#d0d7de] dark:bg-[#30363d] rounded-full w-16"></div>
-                        <div className="h-5 bg-[#d0d7de] dark:bg-[#30363d] rounded-full w-20"></div>
-                      </div>
-                      <div className="flex gap-4">
-                        <div className="h-3 bg-[#d0d7de] dark:bg-[#30363d] rounded w-12"></div>
-                        <div className="h-3 bg-[#d0d7de] dark:bg-[#30363d] rounded w-12"></div>
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -458,88 +220,31 @@ export default function App() {
                 <>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
                     {currentIssues.map((issue) => (
-                      <IssueCard
-                        key={issue.id}
-                        issue={issue}
-                        onInterested={() => handleInterested(issue)}
-                        onSkip={handleSkip}
-                        darkMode={darkMode}
-                      />
+                      <IssueCard key={issue.id} issue={issue} onInterested={() => handleInterested(issue)} onSkip={handleSkip} darkMode={darkMode} />
                     ))}
                   </div>
 
-                  {/* Pagination Controls */}
                   <div className="flex items-center justify-center gap-3 mt-2">
                     {currentIndex > 0 && (
-                      <Button
-                        onClick={handleGoBack}
-                        variant="outline"
-                        className="border-[#d0d7de] dark:border-[#30363d] text-[#24292f] dark:text-[#e6edf3] hover:bg-[#f6f8fa] dark:hover:bg-[#21262d]"
-                      >
-                        ← Previous
-                      </Button>
+                      <Button onClick={handleGoBack} variant="outline" className="border-[#d0d7de] dark:border-[#30363d] text-[#24292f] dark:text-[#e6edf3]">← Previous</Button>
                     )}
-                    {filteredIssues.length > 0 && (
-                      <span className="text-xs text-[#656d76] dark:text-[#8b949e]">
-                        {currentIndex + 1}–{Math.min(currentIndex + 6, filteredIssues.length)} of {filteredIssues.length}
-                      </span>
-                    )}
-                    {currentIndex + 6 < filteredIssues.length && (
-                      <Button
-                        onClick={handleLoadMore}
-                        className="bg-[#0969da] hover:bg-[#0860ca] dark:bg-[#1f6feb] dark:hover:bg-[#1a5cd7] text-white"
-                      >
-                        Load More →
-                      </Button>
-                    )}
+                    {filteredIssues.length > 0 && <span className="text-xs text-[#656d76] dark:text-[#8b949e]">{currentIndex + 1}–{Math.min(currentIndex + 6, filteredIssues.length)} of {filteredIssues.length}</span>}
+                    {currentIndex + 6 < filteredIssues.length && <Button onClick={() => setCurrentIndex(c => c + 6)} className="bg-[#0969da] hover:bg-[#0860ca] text-white">Load More →</Button>}
                   </div>
 
                   {currentIndex + 6 >= filteredIssues.length && filteredIssues.length > 0 && (
-                    <div className="bg-white dark:bg-[#161b22] rounded-lg border border-[#d0d7de] dark:border-[#30363d] p-8 text-center transition-colors mt-4">
+                    <div className="bg-white dark:bg-[#161b22] rounded-lg border p-8 text-center mt-4">
                       {hasMorePages ? (
                         <>
-                          <p className="text-[#656d76] dark:text-[#8b949e] mb-3">
-                            You've seen all loaded results. Want to find more issues?
-                          </p>
-                          <Button
-                            onClick={handleFetchNextPage}
-                            disabled={loadingMore}
-                            className="bg-[#0969da] hover:bg-[#0860ca] dark:bg-[#1f6feb] dark:hover:bg-[#1a5cd7] text-white"
-                          >
-                            {loadingMore ? (
-                              <>
-                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                Fetching more…
-                              </>
-                            ) : (
-                              "Load More Issues"
-                            )}
+                          <p className="text-[#656d76] dark:text-[#8b949e] mb-3">Seen all loaded results. Find more?</p>
+                          <Button onClick={loadMoreIssues} disabled={loadingMore} className="bg-[#0969da] text-white">
+                            {loadingMore ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Fetching…</> : "Load More Issues"}
                           </Button>
                         </>
                       ) : (
                         <>
-                          <p className="text-[#656d76] dark:text-[#8b949e] mb-2">
-                            You've seen all available issues matching your filters
-                          </p>
-                          {currentIndex > 0 && (
-                            <Button
-                              onClick={handleGoBack}
-                              variant="outline"
-                              className="border-[#d0d7de] dark:border-[#30363d] text-[#24292f] dark:text-[#e6edf3] hover:bg-[#f6f8fa] dark:hover:bg-[#21262d] mr-2"
-                            >
-                              ← Go Back
-                            </Button>
-                          )}
-                          <Button
-                            onClick={() => {
-                              setSelectedSkills([]);
-                              setCurrentIndex(0);
-                            }}
-                            variant="outline"
-                            className="border-[#d0d7de] dark:border-[#30363d] text-[#24292f] dark:text-[#e6edf3] hover:bg-[#f6f8fa] dark:hover:bg-[#21262d]"
-                          >
-                            Clear filters to see more
-                          </Button>
+                          <p className="text-[#656d76] dark:text-[#8b949e] mb-2">Seen all available issues</p>
+                          <Button onClick={() => { setSelectedSkills([]); setCurrentIndex(0); }} variant="outline">Clear filters</Button>
                         </>
                       )}
                     </div>
@@ -548,21 +253,8 @@ export default function App() {
               ) : (
                 <div className="bg-white dark:bg-[#161b22] rounded-lg border border-[#d0d7de] dark:border-[#30363d] p-12 text-center transition-colors">
                   <Sparkles className="w-12 h-12 text-[#656d76] dark:text-[#8b949e] mx-auto mb-4" />
-                  <h3 className="text-lg font-semibold text-[#24292f] dark:text-[#e6edf3] mb-2">
-                    No issues found
-                  </h3>
-                  <p className="text-[#656d76] dark:text-[#8b949e] mb-4">
-                    Try adjusting your skill filters to see more issues
-                  </p>
-                  <Button
-                    onClick={() => {
-                      setSelectedSkills([]);
-                      setShowSkillSelector(true);
-                    }}
-                    className="bg-[#0969da] hover:bg-[#0860ca] dark:bg-[#1f6feb] dark:hover:bg-[#1a5cd7] text-white"
-                  >
-                    Adjust Filters
-                  </Button>
+                  <h3 className="text-lg font-semibold text-[#24292f] dark:text-[#e6edf3] mb-2">No issues found</h3>
+                  <Button onClick={() => { setSelectedSkills([]); setShowSkillSelector(true); }} className="bg-[#0969da] text-white">Adjust Filters</Button>
                 </div>
               )}
             </div>
@@ -570,21 +262,11 @@ export default function App() {
             <div>
               <div className="mb-4">
                 <h2 className="text-xl font-semibold text-[#24292f] dark:text-[#e6edf3]">Your Saved Issues</h2>
-                <p className="text-sm text-[#656d76] dark:text-[#8b949e]">
-                  Issues you're interested in contributing to
-                </p>
               </div>
               <SavedIssues issues={savedIssues} onRemove={handleRemoveSaved} darkMode={darkMode} />
             </div>
           )}
         </main>
-
-        {/* Footer */}
-        <footer className="mt-16 border-t border-[#d0d7de] dark:border-[#30363d] py-8 transition-colors">
-          <div className="max-w-7xl mx-auto px-4 text-center text-[#656d76] dark:text-[#8b949e] text-sm">
-            <p>Find open source issues that match your skills and start contributing today</p>
-          </div>
-        </footer>
       </div>
     </div>
   );
