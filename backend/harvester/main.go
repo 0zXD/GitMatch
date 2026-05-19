@@ -13,6 +13,7 @@ func main() {
 	initMongo()
 
 	http.HandleFunc("/issues", corsMiddleware(handleIssuesRequest))
+	http.HandleFunc("/analyze-issue", corsMiddleware(handleAnalyzeIssueRequest))
 
 	port := os.Getenv("PORT")
 	if port == "" {

@@ -21,6 +21,18 @@ type IssueResult struct {
 	ValidTags         []string           `json:"valid_tags" bson:"valid_tags"`
 }
 
+type IssueAnalysis struct {
+	RepoName                 string    `json:"repo_name" bson:"_id"` // owner/repo#issue_number
+	SetupComplexity          int       `json:"setup_complexity" bson:"setup_complexity"`
+	ContributingFriendliness int       `json:"contributing_friendliness" bson:"contributing_friendliness"`
+	TechStack                []string  `json:"tech_stack" bson:"tech_stack"`
+	Prerequisites            []string  `json:"prerequisites" bson:"prerequisites"`
+	MentorshipSignals        bool      `json:"mentorship_signals" bson:"mentorship_signals"`
+	IssueDebrief             string    `json:"issue_debrief" bson:"issue_debrief"`
+	TacklePlan               []string  `json:"tackle_plan" bson:"tackle_plan"`
+	AnalyzedAt               time.Time `json:"analyzed_at" bson:"analyzed_at"`
+}
+
 type CachedIssuesQuery struct {
 	Key       string        `bson:"_id"`
 	Results   []IssueResult `bson:"results"`

@@ -15,6 +15,7 @@ import (
 )
 
 var cacheCollection *mongo.Collection
+var repoAnalysisCollection *mongo.Collection
 
 func loadEnvFiles() {
 	for _, file := range []string{".env", "../.env", "../../.env", "backend/.env", "../backend/.env"} {
@@ -53,6 +54,8 @@ func initMongo() {
 	}
 
 	cacheCollection = client.Database(dbName).Collection("harvest_cache")
+	issueAnalysisCollection := client.Database(dbName).Collection("issue_analysis")
+	repoAnalysisCollection = issueAnalysisCollection // re-use variable for simplicity or rename if desired
 
 	// Create TTL index: entries expire after 24 hours
 	indexModel := mongo.IndexModel{

@@ -2,7 +2,26 @@ import { Badge } from "./ui/badge";
 import { ExternalLink, GitFork, Star, MessageSquare, AlertCircle, Check, X } from "lucide-react";
 import { Button } from "./ui/button";
 
+export interface RepoAnalysis {
+  setup_complexity: number;
+  contributing_friendliness: number;
+  tech_stack: string[];
+  prerequisites: string[];
+  mentorship_signals: boolean;
+}
+
+export interface IssueAnalysis {
+  setup_complexity: number;
+  contributing_friendliness: number;
+  tech_stack: string[];
+  prerequisites: string[];
+  mentorship_signals: boolean;
+  issue_debrief: string;
+  tackle_plan: string[];
+}
+
 export interface GitHubIssue {
+  number: number;
   id: number;
   title: string;
   repository: string;
@@ -16,6 +35,7 @@ export interface GitHubIssue {
   url: string;
   openIssues?: number;
   languageTags?: string[];
+  repoAnalysis?: RepoAnalysis;
 }
 
 interface IssueCardProps {
@@ -77,6 +97,27 @@ export function IssueCard({ issue, onInterested, onSkip, darkMode }: IssueCardPr
 
       {/* Issue Body */}
       <div className="p-4 space-y-4">
+        {/* Repo Analysis Highlights */}
+        {issue.repoAnalysis && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {issue.repoAnalysis.setup_complexity <= 2 && (
+              <Badge variant="outline" className={`text-xs ${darkMode ? "border-[#2ea043] text-[#2ea043]" : "border-[#1a7f37] text-[#1a7f37]"}`}>
+                <Check className="w-3 h-3 mr-1 inline" /> Easy Setup
+              </Badge>
+            )}
+            {issue.repoAnalysis.contributing_friendliness >= 4 && (
+              <Badge variant="outline" className={`text-xs ${darkMode ? "border-[#a371f7] text-[#a371f7]" : "border-[#8250df] text-[#8250df]"}`}>
+                Has Contributing Guide
+              </Badge>
+            )}
+            {issue.repoAnalysis.mentorship_signals && (
+              <Badge variant="outline" className={`text-xs ${darkMode ? "border-[#58a6ff] text-[#58a6ff]" : "border-[#0969da] text-[#0969da]"}`}>
+                Beginner Friendly Repo
+              </Badge>
+            )}
+          </div>
+        )}
+
         <p className={`text-sm leading-relaxed ${
           darkMode ? "text-[#e6edf3]" : "text-[#24292f]"
         }`}>

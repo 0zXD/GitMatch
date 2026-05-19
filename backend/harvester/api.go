@@ -114,6 +114,7 @@ func handleIssuesRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var results []IssueResult
+
 	for _, node := range searchData.Nodes {
 		if res := graphqlIssueNodeToResult(node); res != nil {
 			results = append(results, *res)

@@ -1,4 +1,4 @@
-import type { GitHubIssue } from "../components/issue-card";
+import type { GitHubIssue, IssueAnalysis } from "../components/issue-card";
 
 const HARVESTER_URL = "http://localhost:8082";
 
@@ -141,6 +141,7 @@ function repoToIssue(repo: RepoResult): GitHubIssue {
     url: repo.url,
     openIssues: repo.open_issues,
     languageTags,
+    number: 0,
   };
 }
 
@@ -237,6 +238,7 @@ export async function fetchIssuesForSkills(
       url: apiIssue.url || "#",
       openIssues: 1, // This represents 1 specific issue now
       languageTags,
+      number: apiIssue.number,
     };
   });
 
@@ -246,4 +248,13 @@ export async function fetchIssuesForSkills(
     page: data.page ?? page,
     endCursor: data.end_cursor,
   };
+}
+
+export async function analyzeSavedIssue(owner: string, repo: string, issueNumber: number): Promise<IssueAnalysis> {
+  const response = await fetch(`${HARVESTER_URL}/analyze-issue?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&issue=${issueNumber}`);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Failed to analyze issue: ${response.status}`);
+  }
+  return response.json();
 }

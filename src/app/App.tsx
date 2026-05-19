@@ -47,10 +47,24 @@ export default function App() {
   const githubUser = userProfile?.username ?? null;
 
   useEffect(() => {
-    if (userProfile) {
+    // Catch OAuth Redirects via URL params
+    const params = new URLSearchParams(window.location.search);
+    const oauthUser = params.get("username");
+    if (oauthUser && !userProfile) {
+      // Clear url parameter without page reload
+      window.history.replaceState({}, document.title, window.location.pathname);
+      
+      // Fetch profile automatically
+      fetch(`http://localhost:8084/user?username=${encodeURIComponent(oauthUser)}`)
+        .then(res => res.json())
+        .then(profile => {
+          handleLogin(profile);
+        })
+        .catch(console.error);
+    } else if (userProfile) {
       loadSavedIssues(userProfile.username);
     }
-  }, [userProfile?.username, loadSavedIssues]);
+  }, [userProfile, loadSavedIssues]);
 
   const handleLogin = (profile: UserProfile) => {
     localStorage.setItem("userProfile", JSON.stringify(profile));
