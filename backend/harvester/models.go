@@ -29,6 +29,7 @@ type IssueAnalysis struct {
 	Prerequisites            []string  `json:"prerequisites" bson:"prerequisites"`
 	MentorshipSignals        bool      `json:"mentorship_signals" bson:"mentorship_signals"`
 	IssueDebrief             string    `json:"issue_debrief" bson:"issue_debrief"`
+	Recommendation           string    `json:"recommendation" bson:"recommendation"`
 	TacklePlan               []string  `json:"tackle_plan" bson:"tackle_plan"`
 	AnalyzedAt               time.Time `json:"analyzed_at" bson:"analyzed_at"`
 }

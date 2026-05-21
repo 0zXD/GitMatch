@@ -93,7 +93,13 @@ func getIssueAnalysis(ctx context.Context, owner, repo string, issueNumber int, 
 		issueBody = *issue.Body
 	}
 
-	analysis, err := analyzeIssueWithLLM(ctx, readmeContent, issueBody)
+	tree, _ := getFileTree(ctx, client, owner, repo)
+	var detectedTechStack []string
+	if tree != nil {
+		detectedTechStack, _ = extractDependencies(ctx, client, owner, repo, tree)
+	}
+
+	analysis, err := analyzeIssueWithLLM(ctx, readmeContent, issueBody, detectedTechStack)
 	if err != nil {
 		return nil, fmt.Errorf("analyzing issue: %w", err)
 	}
@@ -111,7 +117,7 @@ func getIssueAnalysis(ctx context.Context, owner, repo string, issueNumber int, 
 	return analysis, nil
 }
 
-func analyzeIssueWithLLM(ctx context.Context, readmeContent, issueBody string) (*IssueAnalysis, error) {
+func analyzeIssueWithLLM(ctx context.Context, readmeContent, issueBody string, detectedTechStack []string) (*IssueAnalysis, error) {
 	// Look for GROQ_API_KEY first, fallback to OPENAI_API_KEY if they reused the var
 	apiKeysStr := os.Getenv("GROQ_API_KEY")
 	if apiKeysStr == "" {
@@ -130,8 +136,14 @@ func analyzeIssueWithLLM(ctx context.Context, readmeContent, issueBody string) (
 		issueBody = issueBody[:10000]
 	}
 
+	techStackContext := ""
+	if len(detectedTechStack) > 0 {
+		techStackContext = "\nWe have ALREADY SCANNED this repository and positively identified the following true dependency tree/tech stack: " + strings.Join(detectedTechStack, ", ") + ".\nUse this as the definitive tech stack."
+	}
+
 	prompt := `You are an expert developer helping a contributor onboard to a project and tackle a specific issue.
-Analyze the provided README AND the Issue body to extract the following information.
+Analyze the provided README AND the Issue body to extract the following information.` + techStackContext + `
+
 Output ONLY a valid JSON object matching this schema:
 {
 	"setup_complexity": number (1-5, where 1 is minimal setup e.g. 'npm install', 5 is very complex),
@@ -140,6 +152,7 @@ Output ONLY a valid JSON object matching this schema:
 	"prerequisites": array of strings,
 	"mentorship_signals": boolean,
 	"issue_debrief": string (A concise 1-2 sentence plain-english summary of what the issue actually requires),
+	"recommendation": string (A short, 3-sentence recommendation explaining why this repository is a good fit, what they might struggle with, and where they should start reading the code),
 	"tackle_plan": array of strings (3-5 concrete steps or educated guesses on how the user might start tackling this issue in the codebase)
 }
 

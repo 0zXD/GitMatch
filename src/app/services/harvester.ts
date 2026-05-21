@@ -14,20 +14,58 @@ interface RepoResult {
   valid_tags?: string[];
 }
 
-// GitHub-recognized programming languages (lowercase)
-const GITHUB_LANGUAGES = new Set([
-  "javascript", "typescript", "python", "java", "go", "rust",
-  "c++", "c#", "c", "ruby", "php", "lua", "shell", "nix", "tex",
-  "jupyter notebook", "html", "css", "haskell", "scala", "kotlin",
-  "swift", "objective-c", "dart", "r", "matlab", "perl",
-  "elixir", "erlang", "clojure", "f#", "ocaml", "zig",
-  "groovy", "powershell",
+// GitHub-recognized programming languages and their proper Display Names
+export const GITHUB_LANGUAGES = new Map([
+  ["javascript", "JavaScript"],
+  ["typescript", "TypeScript"],
+  ["python", "Python"],
+  ["java", "Java"],
+  ["go", "Go"],
+  ["rust", "Rust"],
+  ["c++", "C++"],
+  ["c#", "C#"],
+  ["c", "C"],
+  ["ruby", "Ruby"],
+  ["php", "PHP"],
+  ["lua", "Lua"],
+  ["shell", "Shell"],
+  ["tex", "TeX"],
+  ["jupyter notebook", "Jupyter Notebook"],
+  ["html", "HTML"],
+  ["css", "CSS"],
+  ["haskell", "Haskell"],
+  ["scala", "Scala"],
+  ["kotlin", "Kotlin"],
+  ["swift", "Swift"],
+  ["objective-c", "Objective-C"],
+  ["dart", "Dart"],
+  ["r", "R"],
+  ["matlab", "MATLAB"],
+  ["perl", "Perl"],
+  ["elixir", "Elixir"],
+  ["erlang", "Erlang"],
+  ["clojure", "Clojure"],
+  ["f#", "F#"],
+  ["ocaml", "OCaml"],
+  ["zig", "Zig"],
+  ["groovy", "Groovy"],
+  ["powershell", "PowerShell"],
+  ["vue", "Vue"],
+  ["react", "React"],
+]);
+
+// Frameworks and tooling treated as topics rather than pure languages
+const KNOWN_TOPICS = new Set([
+  "react", "vue", "angular", "django", "fastapi", "spring boot",
+  "ruby on rails", "laravel", "node.js", "docker", "kubernetes",
+  "aws", "graphql", "rest api", "mongodb", "postgresql", "mysql",
+  "redis", "tailwind css", "next.js", "nuxt", "svelte", "flask",
+  "express", "pytorch", "tensorflow", "pandas", "numpy", ".net"
 ]);
 
 // Special skill-to-query mappings for non-standard names
 const SKILL_QUERY_MAP: Record<string, string> = {
   "html/css": "language:HTML language:CSS",
-  ".net": "topic:dotnet",
   "rest api": "topic:rest-api",
   "node.js": "topic:nodejs",
 };
@@ -40,11 +78,12 @@ function buildSearchQuery(skills: string[]): string {
 
     if (SKILL_QUERY_MAP[lower]) {
       parts.push(SKILL_QUERY_MAP[lower]);
-    } else if (GITHUB_LANGUAGES.has(lower)) {
-      parts.push(`language:"${skill}"`);
-    } else {
-      // Frameworks, tools, etc. → treat as topic
+    } else if (KNOWN_TOPICS.has(lower)) {
       parts.push(`topic:${lower.replace(/[.\s]+/g, "-")}`);
+    } else {
+      // Because we know userLanguages pulls directly from GitHub's list of 400+ languages,
+      // fallback to language explicitly so unique strings like "Emacs Lisp" don't become dead topics.
+      parts.push(`language:"${skill}"`);
     }
   }
 

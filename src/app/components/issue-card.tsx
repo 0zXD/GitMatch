@@ -17,6 +17,7 @@ export interface IssueAnalysis {
   prerequisites: string[];
   mentorship_signals: boolean;
   issue_debrief: string;
+  recommendation?: string;
   tackle_plan: string[];
 }
 

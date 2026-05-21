@@ -248,6 +248,15 @@ export function SavedIssues({ issues, onRemove, darkMode }: SavedIssuesProps) {
                 </div>
               </div>
 
+              {analysis.recommendation && (
+                <div>
+                  <h4 className="font-semibold mb-2">Recommendation</h4>
+                  <p className={`text-sm leading-relaxed ${darkMode ? "text-[#c9d1d9]" : "text-[#24292f]"}`}>
+                    {analysis.recommendation}
+                  </p>
+                </div>
+              )}
+
               <div>
                 <h4 className="font-semibold mb-2">How to Tackle</h4>
                 <ul className="space-y-2">

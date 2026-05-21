@@ -1,4 +1,5 @@
 import { X, User, Globe } from "lucide-react";
+import { GITHUB_LANGUAGES } from "../services/harvester";
 
 interface SkillSelectorProps {
   selectedSkills: string[];
@@ -7,14 +8,8 @@ interface SkillSelectorProps {
   userLanguages?: string[];
 }
 
-const availableSkills = [
-  "JavaScript", "TypeScript", "React", "Vue", "Angular",
-  "Python", "Django", "FastAPI", "Java", "Spring Boot",
-  "Go", "Rust", "C++", "C#", ".NET",
-  "Ruby", "Rails", "PHP", "Laravel", "Node.js",
-  "Docker", "Kubernetes", "AWS", "GraphQL", "REST API",
-  "MongoDB", "PostgreSQL", "MySQL", "Redis", "HTML/CSS"
-];
+// Convert Map values purely to their designated UI strings
+const availableSkills = Array.from(GITHUB_LANGUAGES.values());
 
 function SkillButton({
   skill,
@@ -47,10 +42,13 @@ function SkillButton({
 }
 
 export function SkillSelector({ selectedSkills, onSkillToggle, darkMode, userLanguages = [] }: SkillSelectorProps) {
-  // Languages the user actually uses (from their GitHub repos)
-  const userLangs = userLanguages.length > 0 ? userLanguages : [];
+  // Only expose languages from their GitHub profile that are mainstream/widely recognized
+  // (Prevents dead-end recommendations if they have random language artifacts like "Makefile" or "INI")
+  const userLangs = userLanguages
+    .filter((lang) => GITHUB_LANGUAGES.has(lang.toLowerCase()))
+    .map((lang) => GITHUB_LANGUAGES.get(lang.toLowerCase())!);
 
-  // Other skills: everything in availableSkills that isn't already in the user's languages
+  // Other skills: everything in availableSkills that isn't already in the user's filtered languages
   const userLangsLower = new Set(userLangs.map((l) => l.toLowerCase()));
   const otherSkills = availableSkills.filter(
     (skill) => !userLangsLower.has(skill.toLowerCase())
