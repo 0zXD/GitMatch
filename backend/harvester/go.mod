@@ -14,6 +14,7 @@ require (
 	github.com/cloudflare/circl v1.1.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/klauspost/compress v1.17.6 // indirect
+	github.com/sashabaranov/go-openai v1.41.2 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect

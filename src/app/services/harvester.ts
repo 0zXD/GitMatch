@@ -1,4 +1,4 @@
-import type { GitHubIssue } from "../components/issue-card";
+import type { GitHubIssue, IssueAnalysis } from "../components/issue-card";
 
 const HARVESTER_URL = "http://localhost:8082";
 
@@ -14,20 +14,58 @@ interface RepoResult {
   valid_tags?: string[];
 }
 
-// GitHub-recognized programming languages (lowercase)
-const GITHUB_LANGUAGES = new Set([
-  "javascript", "typescript", "python", "java", "go", "rust",
-  "c++", "c#", "c", "ruby", "php", "lua", "shell", "nix", "tex",
-  "jupyter notebook", "html", "css", "haskell", "scala", "kotlin",
-  "swift", "objective-c", "dart", "r", "matlab", "perl",
-  "elixir", "erlang", "clojure", "f#", "ocaml", "zig",
-  "groovy", "powershell",
+// GitHub-recognized programming languages and their proper Display Names
+export const GITHUB_LANGUAGES = new Map([
+  ["javascript", "JavaScript"],
+  ["typescript", "TypeScript"],
+  ["python", "Python"],
+  ["java", "Java"],
+  ["go", "Go"],
+  ["rust", "Rust"],
+  ["c++", "C++"],
+  ["c#", "C#"],
+  ["c", "C"],
+  ["ruby", "Ruby"],
+  ["php", "PHP"],
+  ["lua", "Lua"],
+  ["shell", "Shell"],
+  ["tex", "TeX"],
+  ["jupyter notebook", "Jupyter Notebook"],
+  ["html", "HTML"],
+  ["css", "CSS"],
+  ["haskell", "Haskell"],
+  ["scala", "Scala"],
+  ["kotlin", "Kotlin"],
+  ["swift", "Swift"],
+  ["objective-c", "Objective-C"],
+  ["dart", "Dart"],
+  ["r", "R"],
+  ["matlab", "MATLAB"],
+  ["perl", "Perl"],
+  ["elixir", "Elixir"],
+  ["erlang", "Erlang"],
+  ["clojure", "Clojure"],
+  ["f#", "F#"],
+  ["ocaml", "OCaml"],
+  ["zig", "Zig"],
+  ["groovy", "Groovy"],
+  ["powershell", "PowerShell"],
+  ["vue", "Vue"],
+  ["react", "React"],
+]);
+
+// Frameworks and tooling treated as topics rather than pure languages
+const KNOWN_TOPICS = new Set([
+  "react", "vue", "angular", "django", "fastapi", "spring boot",
+  "ruby on rails", "laravel", "node.js", "docker", "kubernetes",
+  "aws", "graphql", "rest api", "mongodb", "postgresql", "mysql",
+  "redis", "tailwind css", "next.js", "nuxt", "svelte", "flask",
+  "express", "pytorch", "tensorflow", "pandas", "numpy", ".net"
 ]);
 
 // Special skill-to-query mappings for non-standard names
 const SKILL_QUERY_MAP: Record<string, string> = {
   "html/css": "language:HTML language:CSS",
-  ".net": "topic:dotnet",
   "rest api": "topic:rest-api",
   "node.js": "topic:nodejs",
 };
@@ -40,11 +78,12 @@ function buildSearchQuery(skills: string[]): string {
 
     if (SKILL_QUERY_MAP[lower]) {
       parts.push(SKILL_QUERY_MAP[lower]);
-    } else if (GITHUB_LANGUAGES.has(lower)) {
-      parts.push(`language:"${skill}"`);
-    } else {
-      // Frameworks, tools, etc. → treat as topic
+    } else if (KNOWN_TOPICS.has(lower)) {
       parts.push(`topic:${lower.replace(/[.\s]+/g, "-")}`);
+    } else {
+      // Because we know userLanguages pulls directly from GitHub's list of 400+ languages,
+      // fallback to language explicitly so unique strings like "Emacs Lisp" don't become dead topics.
+      parts.push(`language:"${skill}"`);
     }
   }
 
@@ -141,6 +180,7 @@ function repoToIssue(repo: RepoResult): GitHubIssue {
     url: repo.url,
     openIssues: repo.open_issues,
     languageTags,
+    number: 0,
   };
 }
 
@@ -148,38 +188,112 @@ export interface HarvestResult {
   issues: GitHubIssue[];
   hasMore: boolean;
   page: number;
+  endCursor?: string;
+}
+
+interface IssueResultApi {
+  id: number;
+  title: string;
+  url: string;
+  number: number;
+  state: string;
+  body: string;
+  comments: number;
+  labels: string[];
+  created_at: string;
+  name: string;
+  repo_url: string;
+  stars: number;
+  description: string;
+  primary_language: string;
+  language_breakdown?: Record<string, number>;
+  valid_tags?: string[];
 }
 
 interface HarvestResponse {
-  results: RepoResult[];
+  results: IssueResultApi[];
   has_more: boolean;
   page: number;
+  end_cursor?: string;
 }
 
-export async function fetchReposForSkills(
+export async function fetchIssuesForSkills(
   skills: string[],
+  experience: "beginner" | "intermediate" | "advanced" = "beginner",
+  repoCount: number = 0,
   signal?: AbortSignal,
   page: number = 1,
+  cursor?: string,
 ): Promise<HarvestResult> {
   if (skills.length === 0) return { issues: [], hasMore: false, page: 1 };
 
   const query = buildSearchQuery(skills);
-  const params = new URLSearchParams({ q: query, page: String(page) });
-  const response = await fetch(`${HARVESTER_URL}/harvest?${params}`, { signal });
+  const params = new URLSearchParams({ 
+    q: query, 
+    page: String(page),
+    experience: experience,
+    repoCount: String(repoCount)
+  });
+  if (cursor) {
+    params.append('after', cursor);
+  }
+  const response = await fetch(`${HARVESTER_URL}/issues?${params}`, { signal });
 
   if (!response.ok) {
     throw new Error(`Harvester API error: ${response.status}`);
   }
 
   const data: HarvestResponse = await response.json();
-  const repos = data.results ?? [];
-  const issues = repos
-    .filter((r) => r.open_issues > 0)
-    .map(repoToIssue);
+  const rawIssues = data.results ?? [];
+  const issues: GitHubIssue[] = rawIssues.map((apiIssue) => {
+    const lang = apiIssue.primary_language || "Open Source";
+    const languageTags = apiIssue.valid_tags?.length
+      ? apiIssue.valid_tags
+      : lang !== "Open Source"
+        ? [lang]
+        : [];
+
+    const apiLabels = apiIssue.labels || [];
+    let difficulty: "beginner" | "intermediate" | "advanced" = "intermediate";
+    const titleLower = apiIssue.title ? apiIssue.title.toLowerCase() : "";
+    const isBeginner = apiLabels.some((l) =>
+      l.toLowerCase().includes("good first") || l.toLowerCase().includes("beginner") || l.toLowerCase().includes("easy")
+    );
+    if (isBeginner || titleLower.includes("good first") || titleLower.includes("easy")) {
+      difficulty = "beginner";
+    }
+
+    return {
+      id: apiIssue.id || Math.random(),
+      title: apiIssue.title || "Untitled Issue",
+      repository: apiIssue.name || "Unknown Repo",
+      description: apiIssue.body ? apiIssue.body.substring(0, 150) + "..." : (apiIssue.description || "No description provided."),
+      labels: apiLabels.slice(0, 4),
+      language: lang,
+      stars: apiIssue.stars || 0,
+      forks: 0,
+      comments: apiIssue.comments || 0,
+      difficulty,
+      url: apiIssue.url || "#",
+      openIssues: 1, // This represents 1 specific issue now
+      languageTags,
+      number: apiIssue.number,
+    };
+  });
 
   return {
     issues,
     hasMore: data.has_more ?? false,
     page: data.page ?? page,
+    endCursor: data.end_cursor,
   };
+}
+
+export async function analyzeSavedIssue(owner: string, repo: string, issueNumber: number): Promise<IssueAnalysis> {
+  const response = await fetch(`${HARVESTER_URL}/analyze-issue?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}&issue=${issueNumber}`);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || `Failed to analyze issue: ${response.status}`);
+  }
+  return response.json();
 }
